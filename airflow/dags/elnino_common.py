@@ -124,7 +124,7 @@ def fetch_open_meteo(location: tuple, dataset: str, run_date: str) -> list:
     url = _build_url(dataset, lat, lon, start, run_date)
 
     log.info(f"GET {dataset} {name} -> {url}")
-    resp = requests.get(url, timeout=60)
+    resp = requests.get(url, timeout=60, verify=False)
     resp.raise_for_status()
     body = resp.json()
 
