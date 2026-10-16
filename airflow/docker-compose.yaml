@@ -12,6 +12,13 @@ x-airflow-common:
     - ./dags:/opt/airflow/dags
     - ./logs:/opt/airflow/logs
     - /var/run/docker.sock:/var/run/docker.sock
+  # gid 1000 = group pemilik podman.sock di machine (core) — agar
+  # user airflow (50000) boleh akses docker API utk exec ke day43-spark
+  group_add:
+    - "1000"
+  # podman VM pakai SELinux — tanpa ini mount docker.sock denied (Errno 13)
+  security_opt:
+    - label=disable
   depends_on:
     - postgres
   networks:
