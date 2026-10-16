@@ -16,3 +16,6 @@ minio
 pyarrow
 apache-airflow-providers-postgres
 requests
+# dipakai dag_utils.py (DAG day43_batch_pipeline) untuk docker exec
+# job spark di container day43-spark — perlu rebuild image airflow
+docker

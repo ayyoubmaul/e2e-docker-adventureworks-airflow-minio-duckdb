@@ -1,0 +1,154 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# E2E — Hadoop Layer: HDFS NameNode/DataNode + Hive Metastore
+#
+# Referensi pola : day43-production/docker-compose.infra.yml
+# Perbedaan      : PostgreSQL AdventureWorks TIDAK dikelola di sini —
+#                  memakai container `adventureworks-pg` yang sudah ada,
+#                  dan semua service join network `elt_pipeline_elt-net`
+#                  yang SUDAH ADA (sama dengan Airflow/MinIO).
+#
+# Prasyarat:
+#   1. Network ada      : docker network create elt_pipeline_elt-net (sekali saja)
+#   2. adventureworks-pg running + ter-connect ke network tsb
+#   3. Build hive image : docker compose -f docker-compose.hadoop.yml build hive-metastore
+#
+# Up  : docker compose -f docker-compose.hadoop.yml up -d
+# Down: docker compose -f docker-compose.hadoop.yml down
+#
+# UI:
+#   NameNode Web UI → http://localhost:9870
+#   DataNode Web UI → http://localhost:9864
+# ─────────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ── HDFS NameNode (fs.defaultFS = hdfs://namenode:9000) ───────────────────
+  namenode:
+    image: apache/hadoop:3.3.6
+    container_name: hadoop-namenode
+    hostname: namenode
+    user: root
+    # Format hanya sekali (saat VERSION belum ada) supaya data HDFS
+    # tetap aman saat container di-restart (day43 memakai -force selalu).
+    command: >
+      bash -c "
+        mkdir -p /tmp/hadoop-hadoop/dfs/name &&
+        chown -R hadoop:hadoop /tmp/hadoop-hadoop &&
+        if [ ! -f /tmp/hadoop-hadoop/dfs/name/current/VERSION ]; then
+          su -s /bin/bash hadoop -c 'hdfs namenode -format -nonInteractive';
+        else
+          echo 'NameNode sudah ter-format — skip';
+        fi &&
+        su -s /bin/bash hadoop -c 'hdfs namenode'
+      "
+    environment:
+      ENSURE_NAMENODE_DIR: "/tmp/hadoop-hadoop/dfs/name"
+    env_file:
+      - ./hadoop/hadoop.env
+    ports:
+      - "9870:9870"   # Web UI NameNode
+      - "19000:9000"  # fs.defaultFS (RPC) — host-side remap 19000 (9000 dipakai elt_minio; job akses via alias internal namenode:9000)
+    volumes:
+      - hadoop_namenode_data:/tmp/hadoop-hadoop/dfs/name
+    networks:
+      - elt-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9870"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # ── HDFS DataNode ──────────────────────────────────────────────────────────
+  datanode:
+    image: apache/hadoop:3.3.6
+    container_name: hadoop-datanode
+    hostname: datanode
+    user: root
+    command: >
+      bash -c "
+        mkdir -p /tmp/hadoop-hadoop/dfs/data &&
+        chown -R hadoop:hadoop /tmp/hadoop-hadoop &&
+        su -s /bin/bash hadoop -c 'hdfs datanode'
+      "
+    env_file:
+      - ./hadoop/hadoop.env
+    ports:
+      - "9864:9864"   # Web UI DataNode
+    volumes:
+      - hadoop_datanode_data:/tmp/hadoop-hadoop/dfs/data
+    depends_on:
+      namenode:
+        condition: service_healthy
+    networks:
+      - elt-net
+
+  # ── Hive DB init: buat database hive_metastore di adventureworks-pg ───────
+  # (padanan healthcheck auto-create di day43 docker-compose.infra.yml)
+  hive-db-init:
+    image: postgres:15-alpine
+    container_name: hive-db-init
+    restart: "no"
+    entrypoint: >
+      /bin/sh -c "
+        i=0;
+        until PGPASSWORD=My_password1 pg_isready -h adventureworks-pg -p 5432 -U postgres >/dev/null 2>&1;
+        do i=$$((i+1));
+           if [ $$i -ge 30 ]; then echo 'FATAL: adventureworks-pg tidak terjangkau di elt_pipeline_elt-net' >&2; exit 1; fi;
+           echo 'Menunggu adventureworks-pg ...'; sleep 2;
+        done;
+        EXISTS=$$(PGPASSWORD=My_password1 psql -h adventureworks-pg -p 5432 -U postgres -d postgres -tAc \"SELECT 1 FROM pg_database WHERE datname='hive_metastore'\");
+        if [ \"$$EXISTS\" = \"1\" ]; then echo 'Database hive_metastore sudah ada — skip';
+        else PGPASSWORD=My_password1 psql -h adventureworks-pg -p 5432 -U postgres -d postgres -c 'CREATE DATABASE hive_metastore OWNER postgres'; fi;
+        echo 'hive_metastore siap'
+      "
+    networks:
+      - elt-net
+
+  # ── Hive Metastore (thrift :9083) ──────────────────────────────────────────
+  # Image apache/hive:3.1.3 + PostgreSQL JDBC driver 42.7.3.
+  # Entrypoint resminya otomatis jalan `schematool -initSchema` kalau
+  # schema metastore belum ada (IS_RESUME=false) — sama seperti day43.
+  hive-metastore:
+    build:
+      context: ./hive
+      dockerfile: Dockerfile
+    image: e2e-hive-metastore:latest
+    container_name: hive-metastore
+    hostname: hive-metastore
+    environment:
+      SERVICE_NAME: metastore
+      DB_DRIVER: postgres
+      IS_RESUME: "true"
+      SERVICE_OPTS: >-
+        -Djavax.jdo.option.ConnectionDriverName=org.postgresql.Driver
+        -Djavax.jdo.option.ConnectionURL=jdbc:postgresql://adventureworks-pg:5432/hive_metastore
+        -Djavax.jdo.option.ConnectionUserName=postgres
+        -Djavax.jdo.option.ConnectionPassword=My_password1 -Dhive.metastore.schema.verification=false
+    ports:
+      - "9083:9083"   # Metastore thrift → dipakai Spark/Beeline
+    depends_on:
+      namenode:
+        condition: service_healthy
+      hive-db-init:
+        condition: service_completed_successfully
+    networks:
+      - elt-net
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c 'echo > /dev/tcp/localhost/9083' 2>/dev/null"]
+      interval: 20s
+      timeout: 10s
+      retries: 15
+      start_period: 90s
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Network yang SUDAH ADA di repo ini (dipakai juga oleh
+# airflow/docker-compose.yaml) — jangan buat network berbeda.
+# ──────────────────────────────────────────────────────────────────────────────
+networks:
+  elt-net:
+    external: true
+    name: elt_pipeline_elt-net
+
+volumes:
+  hadoop_namenode_data:
+  hadoop_datanode_data:

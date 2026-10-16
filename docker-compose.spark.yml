@@ -1,0 +1,66 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# E2E — Application Layer: Spark + Jupyter (container: day43-spark)
+#
+# Referensi pola : day43-production/docker-compose.apps.yml (service `spark`)
+# Perbedaan      : join network `elt_pipeline_elt-net` yang SUDAH ADA dan
+#                  mengarah ke `adventureworks-pg` (Postgres yang sudah ada).
+#
+# Up  : docker compose -f docker-compose.spark.yml up -d
+# Down: docker compose -f docker-compose.spark.yml down
+#
+# UI:
+#   JupyterLab → http://localhost:8888  (token: bigdata2024)
+#   Spark UI   → http://localhost:4040  (saat SparkSession aktif)
+# ─────────────────────────────────────────────────────────────────────────────
+
+x-spark-env: &spark-env
+  SPARK_MASTER: "local[2]"
+  SPARK_DRIVER_MEMORY: "1g"
+  SPARK_SQL_SHUFFLE_PARTITIONS: "4"
+  JDBC_URL: "jdbc:postgresql://adventureworks-pg:5432/postgres"
+  DB_USER: "postgres"
+  DB_PASSWORD: "My_password1"
+  HDFS_BASE: "hdfs://namenode:9000/datalake/raw"
+  HDFS_CURATED: "hdfs://namenode:9000/datalake/curated"
+  HIVE_METASTORE_URI: "thrift://hive-metastore:9083"
+  HIVE_WAREHOUSE_DIR: "hdfs://namenode:9000/user/hive/warehouse"
+  PYSPARK_PYTHON: "python3"
+  PYTHONUNBUFFERED: "1"
+
+services:
+
+  spark:
+    image: jupyter/pyspark-notebook:spark-3.5.0
+    container_name: day43-spark
+    hostname: spark
+    user: root
+    working_dir: /app
+    environment:
+      <<: *spark-env
+      JUPYTER_ENABLE_LAB: "yes"
+      JUPYTER_TOKEN: "bigdata2024"
+    ports:
+      - "8888:8888"   # JupyterLab
+      - "4040:4040"   # Spark UI
+    volumes:
+      - .:/app        # jobs/, utils/, configs/, jars/, notebooks/
+    networks:
+      - elt-net
+    command: >
+      bash -c "
+        s=1;
+        for i in 1 2 3 4 5 6; do
+          pip install --quiet --timeout 120 --retries 10 pyyaml python-dotenv pyarrow==15.0.2 && s=0 && break || s=$$?;
+          echo 'pip attempt '$$i' failed (rc='$$s'), retrying...'; sleep 10;
+        done;
+        [ $$s -eq 0 ] || exit $$s;
+        start-notebook.sh --NotebookApp.token='bigdata2024'
+      "
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Network yang SUDAH ADA di repo ini — jangan buat network berbeda.
+# ──────────────────────────────────────────────────────────────────────────────
+networks:
+  elt-net:
+    external: true
+    name: elt_pipeline_elt-net

@@ -1,0 +1,9 @@
+# Python
+__pycache__/
+*.pyc
+
+# Log pipeline & airflow runtime
+logs/
+
+# Huge SQL dump > GitHub 100MB limit
+install-d.sql
