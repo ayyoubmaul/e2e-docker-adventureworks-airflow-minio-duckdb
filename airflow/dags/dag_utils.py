@@ -111,9 +111,12 @@ def make_validation_task(task_id: str, database: str = "adventureworks_curated",
         tables_arg = " --tables " + " ".join(tables)
 
     cmd = (
-        f"python /app/jobs/validate_curated.py "
+        "spark-submit "
+        "--master \"${SPARK_MASTER:-local[2]}\" "
+        "--conf spark.ui.showConsoleProgress=false "
+        f"/app/jobs/validate_curated.py "
         f"--config {CONFIG} --database {database}{tables_arg}"
-    )
+    ).strip()
 
     def _run(**context):
         _exec_in_spark_container(cmd, task_id)
